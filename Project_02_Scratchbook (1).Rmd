@@ -1,0 +1,386 @@
+---
+title: "Project 02 Scratchbook"
+author: "Jake Brannen & David Beecher"
+date: "2024-05-06"
+output:
+    pdf_document:
+      df_print: kable
+---
+
+```{r global_options, include=FALSE}
+# these are some optional settings that will change how some features look
+# you do not need to change them.
+knitr::opts_chunk$set(out.width = "50%", out.height="50%", fig.align="center", warning=FALSE, message=FALSE)
+```
+
+
+### Loading Relevant Packages
+```{r message=FALSE, warning=FALSE}
+# Housekeeping
+rm(list = ls())
+
+# Libraries
+library(cluster.datasets)
+library(clustMixType)
+library(dplyr)
+library(factoextra)
+library(GGally)
+library(tidyr)
+
+# Incorporating the main datasets
+data <- read.csv("C:/Users/jakeb/OneDrive/Documents/R Coding/archive/train.csv", 
+                 header = TRUE)
+
+# Set Seed
+s <- 4990
+```
+
+# Initial Investigation and Cleaning
+Giving the data a preliminary look
+```{r}
+#head(data)
+sapply(data, function(x) {sum(is.na(x))})
+```
+
+First column is the observation number (redundant) and the primary key (unneeded).
+
+Gender and customer type should be a factor instead of a character array
+
+Type of Travel and Class as well
+
+Flight distance has a funny minimum of 31, but is fine as it is
+
+The satisfaction level variables we can choose to treat as factors (sensible), or leave as numeric values for the purpose of PCA since that method only handles numeric data. This list includes everything after distance and up to departure delay.
+
+Arrival Delay is the only field with NA's, and is extremely skewed towards zero. We should use the median (0) to fill the NA's here, not just because of the skew, but because I also think that customers leaving that optional field blank is more in line with no flight delay.
+
+Satisfaction should be converted to a factor and we can use that to segment the data into the satisfied and dissatisfied sets.
+```{r}
+# Cutting out the unneeded identifier variables
+data <- data[, !names(data) %in% c("X", "id")]
+
+# This name is killing me
+names(data)[names(data) == "Departure.Arrival.time.convenient"] <- "Depart.Time"
+
+# Creating a list of parameters we want to treat as factors
+params <- c("Gender", "Customer.Type", "Type.of.Travel", "Class", "satisfaction")
+
+# Using lapply to convert the columns to factors
+data[, names(data) %in% params] <- lapply(data[,names(data) %in% params], factor)
+
+# This cleans out the NA values in delay
+data[is.na(data$Arrival.Delay.in.Minutes), "Arrival.Delay.in.Minutes"] <- 0
+```
+
+# Distributions of the Numeric Data
+Now that we have the data all cleaned, we can look at the distributions of the numeric data for scaling purposes
+```{r}
+# Specifying numeric parameters
+params <- colnames(data)[sapply(data, is.numeric)]
+```
+
+```{r eval = FALSE}
+# pairwise plots for numeric variables
+ggpairs(data, columns = params[1:3], aes(col=satisfaction))
+```
+Age exhibits bimodal behavior
+
+Flight distance is skewed
+
+Inflight is skewed for satisfied customers and mostly normal for dissatisfied
+
+```{r eval = FALSE}
+# pairwise plots for numeric variables
+ggpairs(data, columns = params[4:6], aes(col=satisfaction))
+```
+Departure Convenience seems mostly uniform for satisfied customers but skewed for dissatisfied in a way that I wouldn't have expected.
+
+Ease of online booking is mostly normal for dissatisfied and slightly skewed for satisfied
+
+Gate location mostly normal for dissatisfied and mostly uniform for satisfied
+
+```{r eval = FALSE}
+# pairwise plots for numeric variables
+ggpairs(data, columns = params[7:9], aes(col=satisfaction))
+```
+Food and drink is mostly normal for dissatisfied and skewed for satisfied
+
+Online boarding is mostly normal for dissatisfied and extremely skewed for satisfied
+
+Seat Comfort exhibits same behavior
+
+```{r eval = FALSE}
+# pairwise plots for numeric variables
+ggpairs(data, columns = params[10:12], aes(col=satisfaction))
+```
+Inflight Entertainment is mostly uniform for dissatisfied, extremely skewed for satisfied
+
+Onboard service is skewed for both groups
+
+Leg room seems normal for dissatisfied and skewed for satisfied
+
+```{r eval = FALSE}
+# pairwise plots for numeric variables
+ggpairs(data, columns = params[13:15], aes(col=satisfaction))
+```
+Baggage Handling is skewed for both
+
+Chick-in Service seems skewed in opposite ways for the different groups
+
+Inflight Service seems skewed for both groups
+
+```{r eval = FALSE}
+# pairwise plots for numeric variables
+ggpairs(data, columns = params[16:18], aes(col=satisfaction))
+```
+Cleanliness is skewed in opposite directions for different groups
+
+Both delays are almost perfectly correlated. We can probably just get rid of one of these. The distribution here is also so extremely skewed towards zero, that we might want to consider just creating a factor variable for whether or not there was a delay at all instead of treating it numerically.
+
+Additionally, we can look at the correlation matrix for a numerical summary of the correlations
+```{r}
+# We drop the Arrival Delay (Second-to-Last) column
+data <- data %>% select(-Arrival.Delay.in.Minutes)
+
+# We create a factor variable for the departure delay and remove the original variable
+data$Departure.Delay <- as.factor(ifelse(data$Departure.Delay.in.Minutes == 0, "No", "Yes"))
+data <- data %>% select(-Departure.Delay.in.Minutes)
+
+# Specifying numeric parameters
+params <- colnames(data)[sapply(data, is.numeric)]
+
+# We take the correlation matrix
+Correlations <- cor(data[,colnames(data) %in% params])
+
+# And output only the values that are above 0.3 in magnitude to four digits
+(abs(Correlations) > 0.3)*Correlations %>% round(4)
+```
+
+# Splitting the datasets
+```{r}
+# This partitions the data by satisfaction
+data_good <- data[data$satisfaction == "satisfied", !names(data) %in% "satisfaction"]
+data_bad <- data[data$satisfaction != "satisfied", !names(data) %in% "satisfaction"]
+```
+
+# Adjusting the variables
+## Satisfied Customers
+Let's look at histograms of each variable for the first data set
+```{r}
+# Specifying numeric parameters
+params <- colnames(data)[sapply(data, is.numeric)]
+
+ggplot(gather(data_good[,colnames(data) %in% params]), aes(value)) + 
+    geom_histogram(bins = 5) + 
+    facet_wrap(~key, scales = 'free_x')
+```
+
+We're really just looking at the shape of these graphs. We can log transform all of them. The data that's roughly normal will still be roughly normal.
+
+```{r}
+# We make a copy of the data to manipulate
+scaled_good <- data_good
+
+# We make our laundry list of parameters and log transform them
+params <- sapply(scaled_good, is.numeric)
+
+scaled_good[, params] <- log(scaled_good[, params] + 1)
+
+# We then revisualize our data
+ggplot(gather(scaled_good[, params]), aes(value)) + 
+    geom_histogram(bins = 5) + 
+    facet_wrap(~key, scales = 'free_x')
+```
+
+## Dissatisfied Customers
+Similarly for the second dataset
+```{r}
+# Specifying numeric parameters
+params <- sapply(data_bad, is.numeric)
+
+ggplot(gather(data_bad[, params]), aes(value)) + 
+    geom_histogram(bins = 5) + 
+    facet_wrap(~key, scales = 'free_x')
+```
+These are actually pretty normal, so we shouldn't need to log transform them.
+
+
+# PCA
+## Satisfied Customers
+Running PCA on the first dataset, we look at the scree plot
+```{r}
+pca_good <- scaled_good %>% select(where(is.numeric)) %>% prcomp(scale = TRUE)
+fviz_eig(pca_good)
+```
+
+We can look at the variance explained by the first eight principal components now
+```{r}
+varexp_good <- (pca_good$sdev)^2 / sum((pca_good$sdev)^2)
+round(data.frame(num_pcs = 1:8, varexp_good[1:8], cumul_var_explained = cumsum(varexp_good)[1:8]), 4)
+```
+Giving us 81% of the variance in the original dataset
+
+Looking at the PC vectors
+```{r}
+(abs(pca_good$rotation[,1:8]) > 0.3)*pca_good$rotation[,1:8] %>% round(4)
+```
+
+## Dissatisfied Customers
+Running PCA on the second dataset, we look at the scree plot
+```{r}
+pca_bad <- data_bad %>% select(where(is.numeric)) %>% prcomp(scale = TRUE)
+fviz_eig(pca_bad)
+```
+
+We can look at the variance explained by the first eight principal components now
+```{r}
+varexp_bad <- (pca_bad$sdev)^2 / sum((pca_bad$sdev)^2)
+round(data.frame(num_pcs = 1:9, varexp_bad[1:9], cumul_var_explained = cumsum(varexp_bad)[1:9]), 4)
+```
+Giving us 85% of the variance.
+
+Looking at the PC vectors
+```{r}
+(abs(pca_bad$rotation[,1:9]) > 0.3)*pca_bad$rotation[,1:9] %>% round(4)
+```
+
+# K-Prototypes Clustering
+The variables will need to be manually scaled prior to running the clustering algorithm
+```{r}
+scaled_good <- scaled_good %>% mutate(across(where(is.numeric), scale))
+scaled_bad <- data_bad %>% mutate(across(where(is.numeric), scale))
+```
+
+## Satisfied Customers
+Constructing a Scree Plot for the first data set
+```{r eval = FALSE}
+# We initialize an empty array to hold the objective function
+within_ss <- rep(NA, 10)
+
+set.seed(s) # It uses random initialization
+
+# We run the clustering algorithm 10 times
+for(i in 1:10){
+  kp_res <- kproto(x = scaled_good,
+                   k = i,
+                   iter.max = 500,
+                   nstart = 25,
+                   verbose = FALSE,
+                   type = "gower")
+  within_ss[i] <-kp_res$tot.withinss
+  print(kp_res$iter)
+}
+
+# And plot the results
+plot(1:10, within_ss, type = "b", ylab = "Objective Function", 
+     xlab = "# Clusters", main = "Scree Plot")
+```
+
+The optimal number of clusters isn't easy to choose, but five seems like a good enough choice of an "elbow"
+
+Now that we have our defined elbow, we run the clustering algorithm for K = 5su
+```{r}
+set.seed(s)
+
+res_good <- kproto(x = scaled_good, 
+                   k = 5, 
+                   iter.max = 500, 
+                   nstart = 25, 
+                   verbose = FALSE,
+                   type = "gower")
+```
+
+And then
+```{r}
+cluster <- factor(res_good$cluster, order = TRUE, levels = c(1:5))
+fit_good <- data.frame(data_good, cluster)
+summary(fit_good$cluster)
+```
+
+And then
+```{r}
+data_long <- fit_good %>% select(where(is.numeric), cluster) %>% gather(var, value, -cluster)
+
+ggplot(data_long, aes(group = cluster, y = value, fill = cluster), xlab="") + 
+  geom_boxplot() + 
+  labs(title="Satisfied Guests") +
+  facet_wrap(~var, scales="free_y", ncol=3) + 
+  scale_y_continuous(n.breaks = 10,)
+```
+
+Now that we have our clusters attributed and some visualization of the numeric differences between them, we can segment the dataset by the clusters for further analysis.
+```{r}
+clust1_good <- fit_good[cluster == 1,]
+clust2_good <- fit_good[cluster == 2,]
+clust3_good <- fit_good[cluster == 3,]
+clust4_good <- fit_good[cluster == 4,]
+clust5_good <- fit_good[cluster == 5,]
+```
+
+
+## Dissatisfied Customers
+Constructing a Scree Plot for the second data set
+```{r eval = FALSE}
+# We initialize an empty array to hold the objective function
+within_ss <- rep(NA, 10)
+
+set.seed(s) # It uses random initialization
+
+# We run the clustering algorithm 10 times
+for(i in 1:10){
+  kp_res <- kproto(x = scaled_bad,
+                   k = i,
+                   iter.max = 500,
+                   nstart = 25,
+                   verbose = FALSE,
+                   type = "gower")
+  within_ss[i] <-kp_res$tot.withinss
+  print(kp_res$iter)
+}
+
+# And plot the results
+plot(1:10, within_ss, type = "b", ylab = "Objective Function", 
+     xlab = "# Clusters", main = "Scree Plot")
+```
+Five is again a pretty definitive elbow.
+
+Now that we have our defined elbow, we run the clustering algorithm for K = 5
+```{r}
+set.seed(s)
+
+res_bad <- kproto(x = scaled_bad, 
+                  k = 5, 
+                  iter.max = 500, 
+                  nstart = 25, 
+                  verbose = FALSE,
+                  type = "gower")
+```
+
+And then
+```{r}
+cluster <- factor(res_bad$cluster, order = TRUE, levels = c(1:5))
+fit_bad <- data.frame(data_bad, cluster)
+summary(fit_bad$cluster)
+```
+
+And then
+```{r}
+data_long <- fit_bad %>% select(where(is.numeric), cluster) %>% gather(var, value, -cluster)
+
+ggplot(data_long, aes(group = cluster, y = value, fill = cluster), xlab="") + 
+  geom_boxplot() + 
+  labs(title="Dissatisfied Guests") +
+  facet_wrap(~var, scales="free_y", ncol=3) + 
+  scale_y_continuous(n.breaks = 10,)
+```
+
+Now that we have our clusters attributed and some visualization of the numeric differences between them, we can segment the dataset by the clusters for further analysis.
+```{r}
+clust1_bad <- fit_bad[cluster == 1,]
+clust2_bad <- fit_bad[cluster == 2,]
+clust3_bad <- fit_bad[cluster == 3,]
+clust4_bad <- fit_bad[cluster == 4,]
+clust5_bad <- fit_bad[cluster == 5,]
+```
+
+## Full Dataset
